@@ -1,29 +1,34 @@
 #include "st7789_240_135.h"
 
-// static const struct st7789_config lcd_config = {
-//     .spi      = PICO_DEFAULT_SPI_INSTANCE,
-//     .gpio_din = PICO_DEFAULT_SPI_TX_PIN,
-//     .gpio_clk = PICO_DEFAULT_SPI_SCK_PIN,
-//     .gpio_cs  = PICO_DEFAULT_SPI_CSN_PIN,
-//     .gpio_dc  = 20,
-//     .gpio_rst = 21,
-//     .gpio_bl  = 22,
-// };
+// lifted from hagl_hal_single.c
+static void put_pixel(int16_t x0, int16_t y0, color_t color)
+{
+    mipi_display_write(x0, y0, 1, 1, (uint8_t *) &color);
+}
 
-static const struct st7789_config lcd_config = {
-    .spi      = PICO_DEFAULT_SPI_INSTANCE,
-    .gpio_din = 3,
-    .gpio_clk = 2,
-    .gpio_cs  = 5,
-    .gpio_dc  = 1,
-    .gpio_rst = 0,
-    .gpio_bl  = 22,
-};
+static void blit(int16_t x0, int16_t y0, uint16_t width, uint16_t height, uint16_t *src)
+{
+    mipi_display_write(x0, y0, width, height, (uint8_t *) src);
+}
 
 void st7789_240_135_initScreen(void) {
-    // width and height only come into play for fills so let's just pass the memory size instead of LCD size
-    st7789_init(&lcd_config, MEMORY_WIDTH, MEMORY_HEIGHT);
-    st7789_fill(0x0000);
+    mipi_display_init();
+    // sleep_ms(3000);
+
+    uint16_t data[] = {
+        0b0000000000000000
+    };
+
+    // for(uint8_t y = 0; y < 80; y++) {
+    //     blit(x,y,1,1, data);
+    // }
+
+    for (uint8_t x = 0; x < LCD_WIDTH; x++) {
+        for(uint8_t y = 0; y < LCD_HEIGHT; y++) {
+            blit(x, y, 1, 1, data);
+        }
+    }
+    // sleep_ms(3000);
 }
 
 void st7789_240_135_handleFrameStart(uint8_t frame) {
@@ -31,14 +36,13 @@ void st7789_240_135_handleFrameStart(uint8_t frame) {
 }
 
 void st7789_240_135_blit(uint16_t *downsampled_line, int scanline) {
-    // st7789_fill(scanline % 2 == 0 ? 0x0000 : 0xffff);
-    st7789_set_cursor((MEMORY_WIDTH - LCD_WIDTH) / 2 + SCREEN_WIDTH_OFFSET, (MEMORY_HEIGHT - LCD_HEIGHT) / 2 + (scanline));
-    st7789_write(downsampled_line, DOWNSAMPLED_WIDTH*sizeof(uint16_t)); ///???
-    
-    // for debugging
-    // for (uint16_t x = 0; x < DOWNSAMPLED_WIDTH; x++) {
-        // st7789_put(downsampled_line[x]); 
-    // }
+    for (uint8_t x = 0; x < DOWNSAMPLED_WIDTH; x++) {
+        uint16_t color = downsampled_line[x];
+        // st7735 expects least significant byte first, but the normal msb / lsb order in each byte
+        downsampled_line[x] = (((color) << 8) & 0xFF00) | (((color) >> 8) & 0xFF);
+        // put_pixel(x, scanline, downsampled_line[x]);
+    }
+    blit(SCREEN_WIDTH_OFFSET, scanline,DOWNSAMPLED_WIDTH, 1, downsampled_line);
 }
 
 void st7789_240_135_handleScanline(uint16_t *line, int scanline) {
