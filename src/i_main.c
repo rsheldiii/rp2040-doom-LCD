@@ -64,6 +64,10 @@ int main(int argc, char **argv)
     vreg_set_voltage(VREG_VOLTAGE_1_30);
     // todo pause? is this the cause of the cold start isue?
     set_sys_clock_khz(270000, true);
+    // TODO specific to keycap, turn GPIO16 on for audio
+    gpio_init(16);
+    gpio_set_dir(16, GPIO_OUT);
+    gpio_put(16, 1);
 #if !USE_PICO_NET
     // debug ?
 //    gpio_debug_pins_init();

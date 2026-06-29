@@ -5,10 +5,12 @@
 static uint8_t current_downsampled_scanline = 0;
 static uint16_t downsampled_row[DOWNSAMPLED_WIDTH] = {0}; // I have no idea why I can't do (int)DOWNSAMPLED_WIDTH
 
+const uint8_t DOWNSAMPLING_FACTOR = DOWNSAMPLING_FACTOR_OUT_OF_100 / 100;
+
 uint16_t ceiling(uint16_t dividend,uint16_t divisor) {
     return dividend/divisor + (dividend % divisor != 0);
 }
-
+ 
 void clearDownsampleBuffers() {
   memset(downsampled_row, 0, sizeof(downsampled_row[0]) * DOWNSAMPLED_WIDTH);
 }
@@ -163,4 +165,96 @@ void nearestNeighborHandleDownsampling(uint16_t *src, int scanline, void (*callb
             nearestNeighborDownsampleLine(src, downsampled_row);
         }
     } 
+}
+
+
+// Block Average (Box Sampling) Implementation
+// This accumulates all pixels in a block and averages them equally
+
+// We need separate accumulation buffers for RGB channels to avoid overflow
+static uint16_t block_r_accum[DOWNSAMPLED_WIDTH] = {0};
+static uint16_t block_g_accum[DOWNSAMPLED_WIDTH] = {0};
+static uint16_t block_b_accum[DOWNSAMPLED_WIDTH] = {0};
+static uint8_t block_scanline_count = 0;
+
+// Note: Bit shift optimization removed since we now support fractional downsampling
+
+void clearBlockAverageBuffers() {
+    memset(block_r_accum, 0, sizeof(block_r_accum[0]) * DOWNSAMPLED_WIDTH);
+    memset(block_g_accum, 0, sizeof(block_g_accum[0]) * DOWNSAMPLED_WIDTH);
+    memset(block_b_accum, 0, sizeof(block_b_accum[0]) * DOWNSAMPLED_WIDTH);
+    block_scanline_count = 0;
+}
+
+void blockAverageAccumulateLine(uint16_t *src) {
+    // Process each downsampled pixel using fractional downsampling like downsample_scanline
+    for (uint16_t x = 0; x < DOWNSAMPLED_WIDTH; x++) {
+        // Calculate the range of source pixels for this destination pixel
+        uint16_t start = (x * DOWNSAMPLING_FACTOR_OUT_OF_100) / 100;
+        uint16_t end = ((x + 1) * DOWNSAMPLING_FACTOR_OUT_OF_100) / 100;
+        
+        uint16_t r_sum = 0, g_sum = 0, b_sum = 0;
+        
+        // Accumulate all pixels in this horizontal range
+        for (uint16_t px = start; px < end; px++) {
+            uint16_t pixel = src[px];
+            // Extract RGB components (avoiding redundant masking after shift)
+            r_sum += pixel >> 11;
+            g_sum += (pixel >> 5) & 0x3F;  // 6 bits for green
+            b_sum += pixel & 0x1F;          // 5 bits for blue
+        }
+        
+        // Add to accumulator
+        block_r_accum[x] += r_sum;
+        block_g_accum[x] += g_sum;
+        block_b_accum[x] += b_sum;
+    }
+    block_scanline_count++;
+}
+
+void blockAverageOutputLine(uint16_t *dest) {
+    // Calculate total pixels accumulated per downsampled pixel
+    // For each downsampled pixel, we need to know how many source pixels contributed
+    for (uint16_t x = 0; x < DOWNSAMPLED_WIDTH; x++) {
+        // Calculate the range of source pixels for this destination pixel
+        uint16_t start = (x * DOWNSAMPLING_FACTOR_OUT_OF_100) / 100;
+        uint16_t end = ((x + 1) * DOWNSAMPLING_FACTOR_OUT_OF_100) / 100;
+        uint16_t pixels_per_x = end - start;
+        if (pixels_per_x == 0) pixels_per_x = 1; // Avoid division by zero
+        
+        // Total pixels for this downsampled pixel = horizontal_pixels * vertical_scanlines
+        uint16_t total_pixels = pixels_per_x * block_scanline_count;
+        
+        // Average the accumulated values
+        uint8_t r = block_r_accum[x] / total_pixels;
+        uint8_t g = block_g_accum[x] / total_pixels;
+        uint8_t b = block_b_accum[x] / total_pixels;
+        
+        // Reconstruct pixel
+        dest[x] = (r << 11) | (g << 5) | b;
+    }
+}
+
+void blockAverageHandleFrameStart() {
+    clearDownsampleBuffers();
+    clearBlockAverageBuffers();
+    current_downsampled_scanline = 0;
+}
+
+void blockAverageHandleDownsampling(uint16_t *src, int scanline, void (*callback)(uint16_t *, int)) {
+    // Accumulate this scanline
+    blockAverageAccumulateLine(src);
+    
+    // Check if this is the last scanline for the current downsampled row using fractional calculation
+    const uint16_t last_downsample_line = ((current_downsampled_scanline + 1) * DOWNSAMPLING_FACTOR_OUT_OF_100) / 100 - 1;
+    
+    if (last_downsample_line == scanline) {
+        // Output the averaged downsampled row
+        blockAverageOutputLine(downsampled_row);
+        callback(downsampled_row, current_downsampled_scanline);
+        
+        // Clear buffers for next downsampled row
+        clearBlockAverageBuffers();
+        current_downsampled_scanline++;
+    }
 }

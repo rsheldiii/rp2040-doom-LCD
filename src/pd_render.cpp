@@ -34,7 +34,7 @@ extern "C" {
 #include "i_video.h"
 // #include "pico/stdlib.h"
 #if PICO_ON_DEVICE
-#include "pico/st7789.h"
+// #include "pico/st7789.h"
 #endif
 }
 

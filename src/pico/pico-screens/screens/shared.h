@@ -33,6 +33,9 @@ void areaAverageHandleFrameStart(void);
 void nearestNeighborHandleDownsampling(uint16_t *src, int scanline, void (*callback)(uint16_t *, int));
 void nearestNeighborHandleFrameStart(void);
 
+void blockAverageHandleDownsampling(uint16_t *src, int scanline, void (*callback)(uint16_t *, int));
+void blockAverageHandleFrameStart(void);
+
 #endif
 
 #ifdef __cplusplus

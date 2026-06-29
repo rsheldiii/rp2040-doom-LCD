@@ -12,7 +12,7 @@
 // #define LILYGO_TTGO 1
 
 #include <stdlib.h>
-#include "pico/st7789.h"
+#include "mipi_display.h"
 
 #define MEMORY_WIDTH 320
 #define MEMORY_HEIGHT 240

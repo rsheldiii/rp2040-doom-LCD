@@ -31,10 +31,14 @@ void st7735_128_128_initScreen(void) {
             blit(x, y, 1, 1, data);
         }
     }
+    // gpio_init(16);
+    // gpio_set_dir(16, GPIO_OUT);
+    // gpio_put(16, 1);
     // sleep_ms(3000);
 }
 
 void st7735_128_128_handleFrameStart(uint8_t frame) {
+    // gpio_put(16, 1);
     nearestNeighborHandleFrameStart();
 }
 
