@@ -511,6 +511,111 @@ static void pico_quit(void) {
 }
 #endif
 
+#if USE_GPIO_INPUT
+#include "hardware/gpio.h"
+
+// ---------------------------------------------------------------------------
+// On-board controls for the DoomBusinessCard PCB (8 face buttons + 5-way hat).
+//
+// Every switch is wired active-low (GPIO -> switch -> common/GND), so we enable
+// the RP2040 internal pull-ups and treat a logic-low reading as "pressed".
+// Each edge is turned into the same key up/down events the USB/UART keyboard
+// paths already synthesise, so the rest of the game needs no changes.
+//
+// The 8 face buttons each have a dedicated line straight to GND.  The 5-way hat
+// (SW4, Korean Hroparts K1-5202UA-01) is a 4-corner + centre-push switch whose
+// usable contacts come out on GPIO17/18/19/21 and return through a shared
+// common on GPIO20, which we drive low to act as their ground.
+//
+// NOTE: the hat direction<->GPIO assignment below is a best guess from the part
+// datasheet + PCB geometry and is NOT yet hardware-verified.  The GPIO numbers
+// are fixed by the board; if a direction comes out wrong, just move the
+// scancodes between rows of hat_buttons[].  (One of the five contacts is tied
+// to GND on this revision and so cannot be read; if a line turns out to be the
+// centre push rather than a direction, give it scancode 43 = KEY_TAB for the
+// automap.)
+// ---------------------------------------------------------------------------
+
+// USB-HID usage codes.  Bare numbers below come straight from the
+// SCANCODE_TO_KEYS_ARRAY table in doomkeys.h (e.g. 40=enter, 41=esc, 44=space,
+// 48=']', 54=',', 55='.', 79-82 = right/left/down/up arrows).
+#define HID_LCTRL   224   // -> KEY_RCTRL  (fire)
+#define HID_LSHIFT  225   // -> KEY_RSHIFT (run/speed)
+
+// GPIO tied to the hat common terminal; driven low so it grounds the hat lines.
+#define HAT_COMMON_GPIO  20
+
+typedef struct {
+    uint8_t gpio;       // RP2040 GPIO number (fixed by the PCB)
+    uint8_t scancode;   // HID usage code fed to pico_key_down()/pico_key_up()
+} gpio_button_t;
+
+// 8 face buttons: SWx silkscreen -> GPIO -> Doom action.
+static const gpio_button_t face_buttons[] = {
+    {  8, 44 },          // SW8  -> Use / Open    (space)
+    {  9, HID_LSHIFT },  // SW12 -> Run / Speed   (shift, hold)
+    { 10, 48 },          // SW7  -> Next Weapon   (']', see key_nextweapon)
+    { 11, HID_LCTRL },   // SW11 -> Fire          (ctrl)
+    { 12, 40 },          // SW6  -> Enter         (menu confirm)
+    { 13, 54 },          // SW10 -> Strafe Left   (',')
+    { 14, 41 },          // SW5  -> Escape        (menu / pause)
+    { 15, 55 },          // SW9  -> Strafe Right  ('.')
+};
+
+// 5-way hat directions (GPIO20 is the shared common, configured separately).
+static const gpio_button_t hat_buttons[] = {
+    { 17, 82 },          // -> Up    (forward,    up arrow)
+    { 18, 81 },          // -> Down  (back,       down arrow)
+    { 19, 80 },          // -> Left  (turn left,  left arrow)
+    { 21, 79 },          // -> Right (turn right, right arrow)
+};
+
+#define NUM_GPIO_BUTTONS ((int) (count_of(face_buttons) + count_of(hat_buttons)))
+
+// One bit per button: set while we believe the button is held down.
+static uint32_t gpio_button_held;
+
+static const gpio_button_t *gpio_button_at(int i) {
+    return (i < (int) count_of(face_buttons))
+           ? &face_buttons[i]
+           : &hat_buttons[i - (int) count_of(face_buttons)];
+}
+
+static void gpio_input_init(void) {
+    for (int i = 0; i < NUM_GPIO_BUTTONS; i++) {
+        uint gpio = gpio_button_at(i)->gpio;
+        gpio_init(gpio);
+        gpio_set_dir(gpio, GPIO_IN);
+        gpio_pull_up(gpio);
+    }
+    // Drive the hat common low so the four hat lines return to ground.
+    gpio_init(HAT_COMMON_GPIO);
+    gpio_set_dir(HAT_COMMON_GPIO, GPIO_OUT);
+    gpio_put(HAT_COMMON_GPIO, 0);
+    gpio_button_held = 0;
+}
+
+// Polled once per tic from I_GetEventTimeout(); posts a key event on each edge.
+// Sampling at the tic rate also debounces the tact switches for free.
+static void gpio_input_scan(void) {
+    for (int i = 0; i < NUM_GPIO_BUTTONS; i++) {
+        const gpio_button_t *b = gpio_button_at(i);
+        boolean pressed = !gpio_get(b->gpio);           // active-low
+        boolean was_held = (gpio_button_held >> i) & 1u;
+        if (pressed == was_held) {
+            continue;
+        }
+        if (pressed) {
+            gpio_button_held |= (1u << i);
+            pico_key_down(b->scancode, 0, 0);
+        } else {
+            gpio_button_held &= ~(1u << i);
+            pico_key_up(b->scancode, 0, 0);
+        }
+    }
+}
+#endif // USE_GPIO_INPUT
+
 void I_InputInit(void) {
 #if PICO_NO_HARDWARE
     platform_key_down = pico_key_down;
@@ -519,6 +624,9 @@ void I_InputInit(void) {
 #elif USB_SUPPORT
     tusb_init();
     irq_set_priority(USBCTRL_IRQ, 0xc0);
+#endif
+#if USE_GPIO_INPUT
+    gpio_input_init();
 #endif
 }
 
@@ -530,6 +638,9 @@ void I_GetEvent() {
 }
 
 void I_GetEventTimeout(int key_timeout) {
+#if USE_GPIO_INPUT
+    gpio_input_scan();
+#endif
 #if PICO_ON_DEVICE && !NO_USE_UART
     if (uart_is_readable(uart_default)) {
         char c = uart_getc(uart_default);

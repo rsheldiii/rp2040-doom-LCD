@@ -748,6 +748,11 @@ add_doom_tiny_screen("ST7789_240_135")
 target_compile_definitions(doom_tiny_usb_ST7789_240_135 PRIVATE
 DOWNSAMPLING_FACTOR_OUT_OF_100=148
 
+# DoomBusinessCard on-board buttons + 5-way hat (see src/pico/i_input.c).
+# GPIO20/21 (hat common + "right") double as the vgaboard UART1 stdio pins;
+# the hat init repurposes them at startup, so UART stdio simply goes unused.
+USE_GPIO_INPUT=1
+
 # hagl-hal stuff
 
 HAGL_HAL_USE_SINGLE_BUFFER

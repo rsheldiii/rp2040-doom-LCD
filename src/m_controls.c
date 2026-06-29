@@ -130,7 +130,14 @@ key_type_t key_weapon6 = '6';
 key_type_t key_weapon7 = '7';
 key_type_t key_weapon8 = '8';
 key_type_t key_prevweapon = 0;
+#if USE_GPIO_INPUT
+// The on-board "Next Weapon" button (see src/pico/i_input.c) emits ']'; bind it
+// here so the button cycles weapons.  Vanilla leaves this unbound (next/prev
+// weapon are mouse-wheel only), which would make the button do nothing.
+key_type_t key_nextweapon = ']';
+#else
 key_type_t key_nextweapon = 0;
+#endif
 
 // Map control keys:
 
