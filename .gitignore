@@ -61,3 +61,14 @@ GTAGS
 host-build/*
 3rdparty/*
 rp2040-build/*
+
+# Firmware build output
+/out/
+
+# Docker build-harness artifacts & comparison reports (regenerated locally)
+/docker/artifacts/
+/docker-artifacts/
+
+# Local-only reproducibility reference + patch (kept on disk, not in history)
+/reproducibility-report-vm.tar.gz
+/vm-working-tree.patch
