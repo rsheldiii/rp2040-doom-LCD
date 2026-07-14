@@ -923,6 +923,34 @@ static void check_mod(int mod, int prev_mod, int mask, int scancode) {
     }
 }
 
+// One-hand keyboard remap for the split-keyboard demo builds (KEYMAP_ONEHAND).
+// Rewrites the physical USB scancode to the scancode whose Doom binding we want,
+// BEFORE it enters the shared translate/bind path -- and only here on the USB
+// path, so the on-board buttons (which inject their own scancodes downstream)
+// are untouched: e.g. keyboard Space becomes Fire while the on-board Use button
+// (also Space) stays Use.  Targets hit the Doom keys the game AND the menus
+// already use (arrows, ctrl, enter), so WASD drives movement and menu nav alike.
+//   W/A/S/D -> arrows    E -> space (use)    F -> enter (select)
+//   Space   -> LCtrl (fire)    Tab -> ']' (next weapon)
+//   (Esc / Ctrl / Shift left alone: already Esc / fire / run)
+#if KEYMAP_ONEHAND
+static uint8_t onehand_remap_scancode(uint8_t hid) {
+    switch (hid) {
+        case 26: return 82;   // W -> Up arrow
+        case 4:  return 80;   // A -> Left arrow
+        case 22: return 81;   // S -> Down arrow
+        case 7:  return 79;   // D -> Right arrow
+        case 8:  return 44;   // E -> Space (use)
+        case 9:  return 40;   // F -> Enter (menu select)
+        case 44: return 224;  // Space -> Left Ctrl (fire)
+        case 43: return 48;   // Tab -> ']' (next weapon)
+        default: return hid;
+    }
+}
+#else
+static inline uint8_t onehand_remap_scancode(uint8_t hid) { return hid; }
+#endif
+
 static void process_kbd_report(hid_keyboard_report_t const *report)
 {
     static hid_keyboard_report_t prev_report = { 0, 0, {0} }; // previous report to check key released
@@ -939,7 +967,7 @@ static void process_kbd_report(hid_keyboard_report_t const *report)
             {
                 // not existed in previous report means the current key is pressed
                 bool const is_shift = report->modifier & (KEYBOARD_MODIFIER_LEFTSHIFT | KEYBOARD_MODIFIER_RIGHTSHIFT);
-                pico_key_down(report->keycode[i], 0, is_shift ? WITH_SHIFT : 0);
+                pico_key_down(onehand_remap_scancode(report->keycode[i]), 0, is_shift ? WITH_SHIFT : 0);
             }
         }
         // Check for key depresses (i.e. was present in prev report but not here)
@@ -948,7 +976,7 @@ static void process_kbd_report(hid_keyboard_report_t const *report)
             if (!find_key_in_report(report, prev_report.keycode[i]))
             {
                 bool const is_shift = report->modifier & (KEYBOARD_MODIFIER_LEFTSHIFT | KEYBOARD_MODIFIER_RIGHTSHIFT);
-                pico_key_up(prev_report.keycode[i], 0, is_shift ? WITH_SHIFT : 0);
+                pico_key_up(onehand_remap_scancode(prev_report.keycode[i]), 0, is_shift ? WITH_SHIFT : 0);
             }
         }
     }

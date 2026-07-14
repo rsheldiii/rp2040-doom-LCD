@@ -657,7 +657,13 @@ if (PICO_SDK)
     )
 endif()
 
+# add_doom_tiny_screen(SCREEN [VARIANT_SUFFIX])
+# VARIANT_SUFFIX (optional) builds a second executable off the same screen, e.g.
+# "_onehand" -> doom_tiny_usb_ST7789_240_135_onehand, so alternate builds
+# (different keymap etc.) can coexist as their own .uf2.  ${SCREEN} is still
+# defined =1 so the screen driver + its defs apply unchanged.
 function(add_doom_tiny_screen SCREEN)
+    set(VARIANT "${ARGV1}")
     if (PICO_SDK)
         # add_doom_tiny(_${SCREEN} ${SCREEN})
 
@@ -675,9 +681,9 @@ function(add_doom_tiny_screen SCREEN)
         #         )
         if (PICO_ON_DEVICE)
             suppress_tinyusb_warnings()
-            add_doom_tiny(_usb_${SCREEN} ${SCREEN})
-            target_link_libraries(doom_tiny_usb_${SCREEN} PRIVATE tiny_settings pico_cd)
-            target_compile_definitions(doom_tiny_usb_${SCREEN} PRIVATE 
+            add_doom_tiny(_usb_${SCREEN}${VARIANT} ${SCREEN})
+            target_link_libraries(doom_tiny_usb_${SCREEN}${VARIANT} PRIVATE tiny_settings pico_cd)
+            target_compile_definitions(doom_tiny_usb_${SCREEN}${VARIANT} PRIVATE
                     USB_SUPPORT=1
                     TINY_WAD_ADDR=0x10042000 # ugh tinyusb is >8K currently!!
             )
@@ -744,8 +750,11 @@ MIPI_DISPLAY_OFFSET_Y=52
 MIPI_DISPLAY_INVERT=1
 )
 
-add_doom_tiny_screen("ST7789_240_135")
-target_compile_definitions(doom_tiny_usb_ST7789_240_135 PRIVATE
+# All the ST7789_240_135 screen defs in one place, so the normal build and the
+# one-hand variant below share a single source of truth (pins, the tuned 67.5MHz
+# clock, mode).  Apply to any target that drives this panel.
+function(st7789_240_135_defs TGT)
+target_compile_definitions(${TGT} PRIVATE
 DOWNSAMPLING_FACTOR_OUT_OF_100=148
 
 # DoomBusinessCard on-board buttons + 5-way hat (see src/pico/i_input.c).
@@ -770,7 +779,9 @@ MIPI_DISPLAY_PIN_BL=22
 MIPI_DISPLAY_PIN_MISO=-1
 
 MIPI_DISPLAY_SPI_PORT=spi0
-MIPI_DISPLAY_SPI_CLOCK_SPEED_HZ=62500000
+# 270 MHz clk_peri (pinned in i_main.c) / 4 = 67.5 MHz, deterministic; ~8% over
+# the ST7789 62.5 MHz datasheet max but universally tolerated.  See clk_peri note.
+MIPI_DISPLAY_SPI_CLOCK_SPEED_HZ=67500000
 MIPI_DISPLAY_PIXEL_FORMAT=MIPI_DCS_PIXEL_FORMAT_16BIT
 
 # MIPI_DISPLAY_ADDRESS_MODE=MIPI_DCS_ADDRESS_MODE_BGR|MIPI_DCS_ADDRESS_MODE_MIRROR_Y|MIPI_DCS_ADDRESS_MODE_MIRROR_X
@@ -787,14 +798,35 @@ MIPI_DISPLAY_OFFSET_Y=52
 
 MIPI_DISPLAY_INVERT=1
 )
+endfunction()
 
-# TODO this is NOT the 128x128 screen anymore
-add_doom_tiny_screen("ST7735_128_128")
-target_compile_definitions(doom_tiny_usb_ST7735_128_128 PRIVATE
+# Normal build: on-board buttons + standard keyboard map.
+add_doom_tiny_screen("ST7789_240_135")
+st7789_240_135_defs(doom_tiny_usb_ST7789_240_135)
+
+# One-hand keyboard variant for the split-keyboard demo cards.  Identical
+# hardware/screen; KEYMAP_ONEHAND=1 swaps in the single-hand USB-keyboard map
+# (WASD move, E use, F select, Space/Ctrl fire, Shift run, Tab weapon -- see
+# src/pico/i_input.c).  On-board buttons are unaffected (remap is USB-only).
+add_doom_tiny_screen("ST7789_240_135" "_onehand")
+st7789_240_135_defs(doom_tiny_usb_ST7789_240_135_onehand)
+target_compile_definitions(doom_tiny_usb_ST7789_240_135_onehand PRIVATE KEYMAP_ONEHAND=1)
+
+# NB: despite the name this target is a 160x80 ST7735 panel (see WIDTH/HEIGHT
+# below), used on the DoomBusinessCards fitted with the swap screen.
+# Defs factored into a function so the normal build and the one-hand variant
+# share one source of truth (same as st7789_240_135_defs above).
+function(st7735_128_128_defs TGT)
+target_compile_definitions(${TGT} PRIVATE
     DOWNSAMPLING_FACTOR_OUT_OF_100=250
 
+    # DoomBusinessCard on-board buttons + 5-way hat (see src/pico/i_input.c).
+    # GPIO20/21 (hat common + "right") double as the vgaboard UART1 stdio pins;
+    # the hat init repurposes them at startup, so UART stdio simply goes unused.
+    USE_GPIO_INPUT=1
+
     # hagl-hal stuff
-    
+
     HAGL_HAL_USE_SINGLE_BUFFER
     # MIPI_DISPLAY_INVERT=1
 
@@ -810,7 +842,12 @@ target_compile_definitions(doom_tiny_usb_ST7735_128_128 PRIVATE
     MIPI_DISPLAY_PIN_MISO=-1
 
     MIPI_DISPLAY_SPI_PORT=spi0
-    MIPI_DISPLAY_SPI_CLOCK_SPEED_HZ=62500000
+    # clk_peri is pinned to 270 MHz in i_main.c (applies to every target), so
+    # this is deterministic: 270/6 = 45 MHz.  Conservative vs the ST7789's 67.5
+    # because ST7735 is rated slower; the DMA overlap hides the transfer under
+    # the downsample compute anyway (128px lines), so 45 costs little/no FPS.
+    # Bump to 67500000 (270/4) if this panel proves it can take it.
+    MIPI_DISPLAY_SPI_CLOCK_SPEED_HZ=45000000
     MIPI_DISPLAY_PIXEL_FORMAT=MIPI_DCS_PIXEL_FORMAT_16BIT
 
     # MIPI_DISPLAY_ADDRESS_MODE=MIPI_DCS_ADDRESS_MODE_BGR|MIPI_DCS_ADDRESS_MODE_MIRROR_Y|MIPI_DCS_ADDRESS_MODE_MIRROR_X
@@ -829,4 +866,15 @@ target_compile_definitions(doom_tiny_usb_ST7735_128_128 PRIVATE
 
     MIPI_DISPLAY_INVERT=1
 )
+endfunction()
+
+# Normal build: on-board buttons + standard keyboard map.
+add_doom_tiny_screen("ST7735_128_128")
+st7735_128_128_defs(doom_tiny_usb_ST7735_128_128)
+
+# One-hand keyboard variant (same panel; KEYMAP_ONEHAND swaps the USB-keyboard
+# map -- see src/pico/i_input.c).  On-board buttons unaffected.
+add_doom_tiny_screen("ST7735_128_128" "_onehand")
+st7735_128_128_defs(doom_tiny_usb_ST7735_128_128_onehand)
+target_compile_definitions(doom_tiny_usb_ST7735_128_128_onehand PRIVATE KEYMAP_ONEHAND=1)
 
