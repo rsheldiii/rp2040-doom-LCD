@@ -25,6 +25,8 @@ docker build -t "$IMAGE" .
 
 echo "==> Building firmware (targets: ${*:-${TARGETS:-all screen targets}})..."
 docker run --rm \
+    --user "$(id -u):$(id -g)" \
+    -e HOME=/tmp \
     -v "$REPO_ROOT:/src:ro" \
     -v "$OUT:/out" \
     -e PICO_BOARD="${PICO_BOARD:-vgaboard}" \

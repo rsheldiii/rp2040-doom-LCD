@@ -56,6 +56,10 @@ RUN git clone --depth 1 --branch 2.0.0 \
 ENV PICO_SDK_PATH=/opt/pico-sdk
 ENV PICO_EXTRAS_PATH=/opt/pico-extras
 
+# run.sh passes --user $(id -u) so artifacts land host-owned; give that
+# unprivileged user somewhere to build.
+RUN mkdir -m 0777 /build
+
 COPY build.sh /usr/local/bin/docker-build.sh
 RUN chmod +x /usr/local/bin/docker-build.sh
 ENTRYPOINT ["/usr/local/bin/docker-build.sh"]
