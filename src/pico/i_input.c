@@ -513,6 +513,10 @@ static void pico_quit(void) {
 
 #if USE_GPIO_INPUT
 #include "hardware/gpio.h"
+#include "hardware/timer.h"   // hardware_alarm_* (default alarm pool is disabled in this build)
+#include "hardware/irq.h"     // irq_set_priority, TIMER_IRQ_0
+#include "hardware/sync.h"    // __dmb()
+#include "pico/time.h"        // make_timeout_time_us
 
 // ---------------------------------------------------------------------------
 // On-board controls for the DoomBusinessCard PCB (8 face buttons + 5-way hat).
@@ -523,17 +527,16 @@ static void pico_quit(void) {
 // paths already synthesise, so the rest of the game needs no changes.
 //
 // The 8 face buttons each have a dedicated line straight to GND.  The 5-way hat
-// (SW4, Korean Hroparts K1-5202UA-01) is a 4-corner + centre-push switch whose
-// usable contacts come out on GPIO17/18/19/21 and return through a shared
-// common on GPIO20, which we drive low to act as their ground.
+// (SW4, Korean Hroparts K1-5202UA-01) is a 4-corner + centre-push switch: five
+// independent contacts that all return through one common terminal.  On this
+// board the common is the GND rail (SW4 footprint pins 5/7/8) and the five
+// contacts come out on GPIO17/18/19/20/21, so every hat contact is just a plain
+// active-low input -- there is NO GPIO to drive as a common.
 //
-// NOTE: the hat direction<->GPIO assignment below is a best guess from the part
-// datasheet + PCB geometry and is NOT yet hardware-verified.  The GPIO numbers
-// are fixed by the board; if a direction comes out wrong, just move the
-// scancodes between rows of hat_buttons[].  (One of the five contacts is tied
-// to GND on this revision and so cannot be read; if a line turns out to be the
-// centre push rather than a direction, give it scancode 43 = KEY_TAB for the
-// automap.)
+// Hardware-verified 2026-07-07 (see hat_buttons[]): the four directions were
+// rotated vs the old datasheet guess, and GPIO20 -- previously mis-driven as an
+// output "common" -- is actually the centre push.  Driving it low is exactly why
+// pressing straight in did nothing; read as an input it works fine.
 // ---------------------------------------------------------------------------
 
 // USB-HID usage codes.  Bare numbers below come straight from the
@@ -541,9 +544,6 @@ static void pico_quit(void) {
 // 48=']', 54=',', 55='.', 79-82 = right/left/down/up arrows).
 #define HID_LCTRL   224   // -> KEY_RCTRL  (fire)
 #define HID_LSHIFT  225   // -> KEY_RSHIFT (run/speed)
-
-// GPIO tied to the hat common terminal; driven low so it grounds the hat lines.
-#define HAT_COMMON_GPIO  20
 
 typedef struct {
     uint8_t gpio;       // RP2040 GPIO number (fixed by the PCB)
@@ -562,23 +562,122 @@ static const gpio_button_t face_buttons[] = {
     { 15, 55 },          // SW9  -> Strafe Right  ('.')
 };
 
-// 5-way hat directions (GPIO20 is the shared common, configured separately).
+// 5-way hat: four directions + centre push, all active-low inputs returning
+// through the GND common.  Hardware-verified 2026-07-07 -- the directions were
+// rotated (forward->right, right->back, back->forward, left correct); solving
+// that back through the old table gives the true wiring below.  GPIO20 is the
+// centre push (was wrongly driven as a "common", so it did nothing before).
 static const gpio_button_t hat_buttons[] = {
-    { 17, 82 },          // -> Up    (forward,    up arrow)
-    { 18, 81 },          // -> Down  (back,       down arrow)
-    { 19, 80 },          // -> Left  (turn left,  left arrow)
-    { 21, 79 },          // -> Right (turn right, right arrow)
+    { 17, 81 },          // -> Down   (back,        down arrow)
+    { 18, 79 },          // -> Right  (turn right,  right arrow)
+    { 19, 80 },          // -> Left   (turn left,   left arrow)
+    { 20, 43 },          // -> Centre push -> Tab   (automap toggle)
+    { 21, 82 },          // -> Up     (forward,     up arrow)
 };
 
 #define NUM_GPIO_BUTTONS ((int) (count_of(face_buttons) + count_of(hat_buttons)))
-
-// One bit per button: set while we believe the button is held down.
-static uint32_t gpio_button_held;
 
 static const gpio_button_t *gpio_button_at(int i) {
     return (i < (int) count_of(face_buttons))
            ? &face_buttons[i]
            : &hat_buttons[i - (int) count_of(face_buttons)];
+}
+
+// --- 5-way hat centre-push suppression -------------------------------------
+// hat_buttons[] follows the 8 face buttons, so the hat's five contacts occupy
+// global indices [NUM_FACE_BUTTONS .. NUM_FACE_BUTTONS+4].  The centre push
+// (hat_buttons[3] = GPIO20) closes very easily when the stick is pushed to a
+// side, firing a stray automap toggle.  We ignore the centre contact whenever
+// ANY of the four direction contacts is closed, so it only registers on a
+// deliberate straight-in press.
+#define NUM_FACE_BUTTONS  ((int) count_of(face_buttons))
+#define BTN_HAT_CENTER    (NUM_FACE_BUTTONS + 3)          // hat_buttons[3]
+#define HAT_DIR_MASK      ( (1u << (NUM_FACE_BUTTONS + 0)) /* Down  (GPIO17) */ \
+                          | (1u << (NUM_FACE_BUTTONS + 1)) /* Right (GPIO18) */ \
+                          | (1u << (NUM_FACE_BUTTONS + 2)) /* Left  (GPIO19) */ \
+                          | (1u << (NUM_FACE_BUTTONS + 4)) /* Up    (GPIO21) */ )
+
+// ---------------------------------------------------------------------------
+// Fast, debounced, latched sampling.
+//
+// The old reader sampled the pins directly, once per Doom tic (<=35 Hz, less if
+// the LCD blit drops a frame): any tap shorter than a tic was dropped and every
+// press carried up to ~28 ms latency.  Instead a 1 kHz hardware-alarm ISR now
+// debounces each contact and pushes every committed edge into a small lock-free
+// queue that the per-tic reader drains -- so brief taps survive and latency
+// falls to ~1-2 ms.  The default SDK alarm pool is disabled in this build (see
+// src/CMakeLists.txt), so we claim a hardware alarm directly, the same way
+// src/pico/piconet.c does.  If none is free we fall back to the old direct
+// per-tic sample so the buttons still work.
+// ---------------------------------------------------------------------------
+#define GPIO_SAMPLE_US        1000   // 1 kHz sampling
+#define GPIO_DEBOUNCE_SAMPLES 4      // consecutive agreeing samples before an edge commits (~4 ms)
+#define GPIO_EVT_LEN          32u    // power of two
+#define GPIO_EVT_MASK         (GPIO_EVT_LEN - 1u)
+
+// Touched only by the sampling ISR (or the per-tic fallback -- they never run
+// together).
+static uint32_t gpio_debounced;                 // committed "pressed" bitmask
+static uint8_t  gpio_stable[NUM_GPIO_BUTTONS];  // samples so far disagreeing with committed
+static int      gpio_alarm_num = -1;
+static bool     gpio_timer_ok;
+static bool     hat_center_locked;              // centre push disqualified until it fully opens
+
+// Single-producer (ISR) / single-consumer (game loop) edge queue.
+// Each byte: bit7 = down(1)/up(0), bits0-6 = button index.
+static uint8_t          gpio_evt_buf[GPIO_EVT_LEN];
+static volatile uint8_t gpio_evt_head, gpio_evt_tail;
+
+// Debounce every contact and enqueue committed press/release edges.  Runs in the
+// alarm ISR; it only samples + enqueues -- the key events are synthesised later,
+// in the game context, by gpio_input_scan().
+static void gpio_sample(void) {
+    // Snapshot every contact this pass (active-low -> bit set = pressed).
+    uint32_t raw_now = 0;
+    for (int i = 0; i < NUM_GPIO_BUTTONS; i++) {
+        if (!gpio_get(gpio_button_at(i)->gpio)) raw_now |= (1u << i);
+    }
+    // Centre-push suppression, latched.  A grazed centre contact easily closes
+    // while the stick is pushed to a side; worse, on release the two contacts
+    // never open at the same instant, so if a direction opens first the centre
+    // momentarily looks like a clean press and toggles the automap.  Rule: the
+    // centre only counts if it stays direction-free for its WHOLE press.  Once
+    // it coincides with any direction we latch it off and keep it suppressed
+    // until the centre contact itself fully opens (which re-arms it).
+    if (!((raw_now >> BTN_HAT_CENTER) & 1u)) {
+        hat_center_locked = false;                       // centre released -> re-arm
+    } else if (raw_now & HAT_DIR_MASK) {
+        hat_center_locked = true;                        // coincided with a direction
+    }
+    if (hat_center_locked) raw_now &= ~(1u << BTN_HAT_CENTER);
+
+    for (int i = 0; i < NUM_GPIO_BUTTONS; i++) {
+        bool raw = (raw_now >> i) & 1u;
+        bool committed = (gpio_debounced >> i) & 1u;
+        if (raw == committed) {
+            gpio_stable[i] = 0;                           // nothing pending
+            continue;
+        }
+        if (++gpio_stable[i] < GPIO_DEBOUNCE_SAMPLES) {
+            continue;                                     // wait for a stable run
+        }
+        gpio_stable[i] = 0;
+        if (raw) gpio_debounced |=  (1u << i);
+        else     gpio_debounced &= ~(1u << i);
+        uint8_t next = (uint8_t) ((gpio_evt_head + 1u) & GPIO_EVT_MASK);
+        if (next != gpio_evt_tail) {                      // else queue full: drop (won't happen)
+            gpio_evt_buf[gpio_evt_head] = (uint8_t) ((raw ? 0x80u : 0u) | (unsigned) i);
+            __dmb();                                      // publish the slot before the index
+            gpio_evt_head = next;
+        }
+    }
+}
+
+static void gpio_sample_isr(uint alarm_num) {
+    (void) alarm_num;
+    // Re-arm first so the cadence stays ~1 kHz regardless of sampling cost.
+    hardware_alarm_set_target(gpio_alarm_num, make_timeout_time_us(GPIO_SAMPLE_US));
+    gpio_sample();
 }
 
 static void gpio_input_init(void) {
@@ -587,31 +686,58 @@ static void gpio_input_init(void) {
         gpio_init(gpio);
         gpio_set_dir(gpio, GPIO_IN);
         gpio_pull_up(gpio);
+        gpio_stable[i] = 0;
     }
-    // Drive the hat common low so the four hat lines return to ground.
-    gpio_init(HAT_COMMON_GPIO);
-    gpio_set_dir(HAT_COMMON_GPIO, GPIO_OUT);
-    gpio_put(HAT_COMMON_GPIO, 0);
-    gpio_button_held = 0;
+    // No hat "common" to drive: SW4's common is the board GND rail, so all five
+    // hat contacts (incl. the GPIO20 centre push) are just the pulled-up inputs
+    // configured in the loop above.
+    gpio_debounced = 0;
+    gpio_evt_head = gpio_evt_tail = 0;
+
+    // Claim a free hardware alarm for the 1 kHz sampler (default pool is off).
+    gpio_alarm_num = hardware_alarm_claim_unused(false);
+    if (gpio_alarm_num >= 0) {
+        hardware_alarm_set_callback(gpio_alarm_num, gpio_sample_isr);
+        irq_set_priority(TIMER_IRQ_0 + gpio_alarm_num, 0xc0);  // below audio/USB, like piconet
+        hardware_alarm_set_target(gpio_alarm_num, make_timeout_time_us(GPIO_SAMPLE_US));
+        gpio_timer_ok = true;
+    }
 }
 
-// Polled once per tic from I_GetEventTimeout(); posts a key event on each edge.
-// Sampling at the tic rate also debounces the tact switches for free.
+// Drained once per tic from I_GetEventTimeout().
 static void gpio_input_scan(void) {
-    for (int i = 0; i < NUM_GPIO_BUTTONS; i++) {
-        const gpio_button_t *b = gpio_button_at(i);
-        boolean pressed = !gpio_get(b->gpio);           // active-low
-        boolean was_held = (gpio_button_held >> i) & 1u;
-        if (pressed == was_held) {
-            continue;
+    if (!gpio_timer_ok) {
+        // Fallback (no hardware alarm was free): the original direct per-tic
+        // sample.  Misses very fast taps but keeps the buttons alive.
+        uint32_t raw_now = 0;
+        for (int i = 0; i < NUM_GPIO_BUTTONS; i++) {
+            if (!gpio_get(gpio_button_at(i)->gpio)) raw_now |= (1u << i);
         }
-        if (pressed) {
-            gpio_button_held |= (1u << i);
-            pico_key_down(b->scancode, 0, 0);
-        } else {
-            gpio_button_held &= ~(1u << i);
-            pico_key_up(b->scancode, 0, 0);
+        // Same latched centre suppression as gpio_sample() (see there).
+        if (!((raw_now >> BTN_HAT_CENTER) & 1u)) {
+            hat_center_locked = false;
+        } else if (raw_now & HAT_DIR_MASK) {
+            hat_center_locked = true;
         }
+        if (hat_center_locked) raw_now &= ~(1u << BTN_HAT_CENTER);
+        for (int i = 0; i < NUM_GPIO_BUTTONS; i++) {
+            const gpio_button_t *b = gpio_button_at(i);
+            bool pressed  = (raw_now >> i) & 1u;
+            bool was_held = (gpio_debounced >> i) & 1u;
+            if (pressed == was_held) continue;
+            if (pressed) { gpio_debounced |=  (1u << i); pico_key_down(b->scancode, 0, 0); }
+            else         { gpio_debounced &= ~(1u << i); pico_key_up(b->scancode, 0, 0); }
+        }
+        return;
+    }
+    // Normal path: replay every edge the sampler latched since the last tic.
+    while (gpio_evt_tail != gpio_evt_head) {
+        __dmb();                                          // read the slot after the index
+        uint8_t e = gpio_evt_buf[gpio_evt_tail];
+        gpio_evt_tail = (uint8_t) ((gpio_evt_tail + 1u) & GPIO_EVT_MASK);
+        const gpio_button_t *b = gpio_button_at(e & 0x7fu);
+        if (e & 0x80u) pico_key_down(b->scancode, 0, 0);
+        else           pico_key_up(b->scancode, 0, 0);
     }
 }
 #endif // USE_GPIO_INPUT
