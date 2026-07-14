@@ -31,6 +31,7 @@
 #include "pico/multicore.h"
 #if PICO_ON_DEVICE
 #include "hardware/vreg.h"
+#include "hardware/clocks.h"
 #endif
 #endif
 #if USE_PICO_NET
@@ -64,6 +65,13 @@ int main(int argc, char **argv)
     vreg_set_voltage(VREG_VOLTAGE_1_30);
     // todo pause? is this the cause of the cold start isue?
     set_sys_clock_khz(270000, true);
+    // Re-point clk_peri at the (now 270 MHz) system clock so the SDK's cached
+    // clk_peri frequency matches reality.  Without this it stays at the boot
+    // value (125 MHz) while the hardware runs at 270, so spi_set_baudrate()
+    // miscomputes and the LCD SPI ends up ~2x over spec.  With clk_peri pinned,
+    // MIPI_DISPLAY_SPI_CLOCK_SPEED_HZ=67.5M lands deterministically at 270/4.
+    clock_configure(clk_peri, 0, CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_CLK_SYS,
+                    270 * MHZ, 270 * MHZ);
     // TODO specific to keycap, turn GPIO16 on for audio
     gpio_init(16);
     gpio_set_dir(16, GPIO_OUT);

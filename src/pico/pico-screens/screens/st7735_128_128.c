@@ -16,6 +16,7 @@ static void blit(int16_t x0, int16_t y0, uint16_t width, uint16_t height, uint16
 void st7735_128_128_initScreen(void) {
 
     mipi_display_init();
+    screenBlitDMAInit();          // enable the shared non-blocking per-line DMA blit
     // sleep_ms(3000);
 
     uint16_t data[] = {
@@ -39,17 +40,16 @@ void st7735_128_128_initScreen(void) {
 
 void st7735_128_128_handleFrameStart(uint8_t frame) {
     // gpio_put(16, 1);
+    // Drain the previous frame's last DMA row before reusing buffers.
+    screenBlitDMAFlush();
     nearestNeighborHandleFrameStart();
 }
 
 void st7735_128_128_blit(uint16_t *downsampled_line, int scanline) {
-    for (uint8_t x = 0; x < DOWNSAMPLED_WIDTH; x++) {
-        uint16_t color = downsampled_line[x];
-        // st7735 expects least significant byte first, but the normal msb / lsb order in each byte
-        downsampled_line[x] = (((color) << 8) & 0xFF00) | (((color) >> 8) & 0xFF);
-        // put_pixel(x, scanline, downsampled_line[x]);
-    }
-    blit(SCREEN_WIDTH_OFFSET, scanline,DOWNSAMPLED_WIDTH, 1, downsampled_line);
+    // Shared non-blocking path: byte-swap into a ping-pong buffer and DMA the
+    // row so the next row is downsampled while this one is on the wire.  Same
+    // helper the ST7789 driver uses -- the MIPI-DCS blit is controller-agnostic.
+    screenBlitLineDMA(SCREEN_WIDTH_OFFSET, scanline, downsampled_line);
 }
 
 void st7735_128_128_handleScanline(uint16_t *line, int scanline) {

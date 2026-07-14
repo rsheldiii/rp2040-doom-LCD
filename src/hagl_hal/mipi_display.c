@@ -97,13 +97,15 @@ static void mipi_display_write_data_dma(const uint8_t *buffer, size_t length)
     dma_channel_set_read_addr(dma_channel, buffer, true);
 }
 
-static void mipi_display_dma_init()
+void mipi_display_dma_init(void)
 {
-    
+
 
     dma_channel = dma_claim_unused_channel(true);
     dma_channel_config channel_config = dma_channel_get_default_config(dma_channel);
     channel_config_set_transfer_data_size(&channel_config, DMA_SIZE_8);
+    channel_config_set_read_increment(&channel_config, true);    // walk the source line
+    channel_config_set_write_increment(&channel_config, false);  // fixed SPI data register
     if (spi0 == MIPI_DISPLAY_SPI_PORT) {
         channel_config_set_dreq(&channel_config, DREQ_SPI0_TX);
     } else {
@@ -284,6 +286,53 @@ size_t mipi_display_write(uint16_t x1, uint16_t y1, uint16_t w, uint16_t h, uint
 #endif /* HAGL_HAS_HAL_BACK_BUFFER */
     /* This should also include the bytes for writing the commands. */
     return size * DISPLAY_DEPTH / 8;
+}
+
+/*
+ * Non-blocking per-line DMA blit used by the LCD scanline push.
+ *
+ * Kicks off this row's SPI transfer via DMA and returns immediately, so the
+ * caller can downsample/convert the NEXT row while this one is on the wire.
+ * The previous row's transfer is drained here at the start -- and note that a
+ * DMA "finish" only means the TX FIFO was filled, so we must also wait for the
+ * SPI shift register to empty (spi_is_busy) before we touch CS/DC or send the
+ * next window-address commands, or they would corrupt the tail of the pixels.
+ *
+ * CS is left asserted while the DMA runs; the next call (or the flush below)
+ * closes it.  Requires mipi_display_dma_init() to have been called.
+ */
+void mipi_display_blit_dma(uint16_t x1, uint16_t y1, uint16_t w, uint16_t h, const uint8_t *buffer)
+{
+    size_t length = (size_t) w * h * DISPLAY_DEPTH / 8;
+    if (0 == length) {
+        return;
+    }
+
+    /* Drain the previous transfer completely before disturbing the bus. */
+    dma_channel_wait_for_finish_blocking(dma_channel);
+    while (spi_is_busy(MIPI_DISPLAY_SPI_PORT)) {
+        tight_loop_contents();
+    }
+    gpio_put(MIPI_DISPLAY_PIN_CS, 1);   /* close the previous data transaction */
+
+    /* Set the target window (blocking 8-bit command writes; bus is idle now). */
+    mipi_display_set_address(x1, y1, x1 + w - 1, y1 + h - 1);
+
+    /* Start this row's pixel DMA and return; CS stays low for the transfer. */
+    gpio_put(MIPI_DISPLAY_PIN_DC, 1);
+    gpio_put(MIPI_DISPLAY_PIN_CS, 0);
+    dma_channel_set_trans_count(dma_channel, length, false);
+    dma_channel_set_read_addr(dma_channel, buffer, true);   /* triggers */
+}
+
+/* Block until the last DMA blit has fully drained and release CS. */
+void mipi_display_blit_dma_flush(void)
+{
+    dma_channel_wait_for_finish_blocking(dma_channel);
+    while (spi_is_busy(MIPI_DISPLAY_SPI_PORT)) {
+        tight_loop_contents();
+    }
+    gpio_put(MIPI_DISPLAY_PIN_CS, 1);
 }
 
 /* TODO: This most likely does not work with dma atm. */

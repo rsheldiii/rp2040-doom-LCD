@@ -13,6 +13,7 @@ static void blit(int16_t x0, int16_t y0, uint16_t width, uint16_t height, uint16
 
 void st7789_240_135_initScreen(void) {
     mipi_display_init();
+    screenBlitDMAInit();          // enable the shared non-blocking per-line DMA blit
     // sleep_ms(3000);
 
     uint16_t data[] = {
@@ -32,17 +33,16 @@ void st7789_240_135_initScreen(void) {
 }
 
 void st7789_240_135_handleFrameStart(uint8_t frame) {
+    // Make sure the previous frame's last DMA row has fully drained before we
+    // start reusing buffers / issuing a new frame.
+    screenBlitDMAFlush();
     nearestNeighborHandleFrameStart();
 }
 
 void st7789_240_135_blit(uint16_t *downsampled_line, int scanline) {
-    for (uint8_t x = 0; x < DOWNSAMPLED_WIDTH; x++) {
-        uint16_t color = downsampled_line[x];
-        // st7735 expects least significant byte first, but the normal msb / lsb order in each byte
-        downsampled_line[x] = (((color) << 8) & 0xFF00) | (((color) >> 8) & 0xFF);
-        // put_pixel(x, scanline, downsampled_line[x]);
-    }
-    blit(SCREEN_WIDTH_OFFSET, scanline,DOWNSAMPLED_WIDTH, 1, downsampled_line);
+    // Shared non-blocking path: byte-swap into a ping-pong buffer and DMA the
+    // row so the next row is downsampled while this one is on the wire.
+    screenBlitLineDMA(SCREEN_WIDTH_OFFSET, scanline, downsampled_line);
 }
 
 void st7789_240_135_handleScanline(uint16_t *line, int scanline) {

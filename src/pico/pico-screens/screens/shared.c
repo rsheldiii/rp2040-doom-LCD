@@ -1,9 +1,37 @@
 #include "shared.h"
 #include "stdlib.h"
+#include "mipi_display.h"
 
 // what (downsampled) scanline we are processing right now
 static uint8_t current_downsampled_scanline = 0;
 static uint16_t downsampled_row[DOWNSAMPLED_WIDTH] = {0}; // I have no idea why I can't do (int)DOWNSAMPLED_WIDTH
+
+// --- Generic non-blocking per-line DMA push (see shared.h) -----------------
+// Two line buffers: the DMA pushes one row to the panel while we build the next.
+// The shared downsampled_row is overwritten for the next scanline immediately,
+// so the DMA can't read it in place -- hence the ping-pong copy, into which we
+// fold the required byte-swap (panel wants the high byte of each RGB565 pixel
+// first on the wire) for free.
+static uint16_t screen_line_buf[2][DOWNSAMPLED_WIDTH];
+static uint8_t  screen_line_buf_idx;
+
+void screenBlitDMAInit(void) {
+    mipi_display_dma_init();
+}
+
+void screenBlitLineDMA(uint16_t offset_x, int scanline, uint16_t *line) {
+    uint16_t *dst = screen_line_buf[screen_line_buf_idx];
+    for (uint16_t x = 0; x < DOWNSAMPLED_WIDTH; x++) {
+        uint16_t color = line[x];
+        dst[x] = (uint16_t) (((color) << 8) | ((color) >> 8));
+    }
+    mipi_display_blit_dma(offset_x, scanline, DOWNSAMPLED_WIDTH, 1, (uint8_t *) dst);
+    screen_line_buf_idx ^= 1;
+}
+
+void screenBlitDMAFlush(void) {
+    mipi_display_blit_dma_flush();
+}
 
 const uint8_t DOWNSAMPLING_FACTOR = DOWNSAMPLING_FACTOR_OUT_OF_100 / 100;
 

@@ -48,6 +48,11 @@ size_t mipi_display_write(uint16_t x1, uint16_t y1, uint16_t w, uint16_t h, uint
 void mipi_display_ioctl(uint8_t command, uint8_t *data, size_t size);
 void mipi_display_close();
 
+/* Non-blocking per-line DMA blit path (overlaps SPI transfer with CPU work). */
+void mipi_display_dma_init(void);
+void mipi_display_blit_dma(uint16_t x1, uint16_t y1, uint16_t w, uint16_t h, const uint8_t *buffer);
+void mipi_display_blit_dma_flush(void);
+
 #ifdef __cplusplus
 }
 #endif
